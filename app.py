@@ -449,24 +449,48 @@ st.markdown("### 3️⃣ Expense Entries")
 collected_rows  = []
 bill_files_list = []   # [(bytes, filename), ...]
 
+# Parse team member list for dropdown
+team_member_list = [m.strip() for m in team_members.split(",") if m.strip()] if team_members else []
+
 for i in range(st.session_state.row_count):
     key = f"row_{i}"
     with st.expander(f"**Row {i+1}**", expanded=True):
         rc1, rc2, rc3 = st.columns(3)
         with rc1:
-            row_date = st.date_input("Date", value=None, key=f"{key}_date")
+            # Date — will be updated by OCR if bill uploaded
+            ocr_date_key = f"{key}_ocr_date"
+            if ocr_date_key not in st.session_state:
+                st.session_state[ocr_date_key] = None
+            date_val = st.session_state[ocr_date_key]
+            row_date = st.date_input("Date", value=date_val, key=f"{key}_date")
         with rc2:
-            acc_sel  = st.selectbox("Accounting Head", ACC_OPTIONS, key=f"{key}_acc")
+            acc_sel = st.selectbox("Accounting Head", ACC_OPTIONS, key=f"{key}_acc")
         with rc3:
-            mode     = st.text_input("Mode of Travel", placeholder="Auto / Cab / Train…", key=f"{key}_mode")
+            # Mode of Travel dropdown with Others option
+            mode_options = ["Auto", "Cab", "Train", "Bus", "Flight", "Others — specify"]
+            mode_sel = st.selectbox("Mode of Travel", mode_options, key=f"{key}_mode_sel")
+            if mode_sel == "Others — specify":
+                mode = st.text_input("Specify mode", placeholder="e.g. Bike, Ferry…", key=f"{key}_mode_other")
+            else:
+                mode = mode_sel
 
         rc4, rc5, rc6 = st.columns(3)
         with rc4:
-            remarks  = st.text_input("Remarks", placeholder="Onward / Return / Purpose", key=f"{key}_rem")
+            # Remarks dropdown with Others option
+            rem_options = ["Onward", "Return", "Onward & Return", "Others — specify"]
+            rem_sel = st.selectbox("Remarks", rem_options, key=f"{key}_rem_sel")
+            if rem_sel == "Others — specify":
+                remarks = st.text_input("Specify remarks", placeholder="e.g. Site visit, Client meeting…", key=f"{key}_rem_other")
+            else:
+                remarks = rem_sel
         with rc5:
-            sup_bills= st.selectbox("Sup. Bills?", ["Yes","No"], key=f"{key}_sup")
+            sup_bills = st.selectbox("Sup. Bills?", ["Yes","No"], key=f"{key}_sup")
         with rc6:
-            member   = st.text_input("Team Member", placeholder="Name", key=f"{key}_mem")
+            # Team member dropdown from header input
+            if team_member_list:
+                member = st.selectbox("Team Member", team_member_list, key=f"{key}_mem")
+            else:
+                member = st.text_input("Team Member", placeholder="Enter name (add team members above first)", key=f"{key}_mem")
 
         # Bill upload
         bc1, bc2 = st.columns(2)
@@ -475,7 +499,6 @@ for i in range(st.session_state.row_count):
             bill_file = st.file_uploader("Upload bill", type=["jpg","jpeg","png","pdf"],
                                           key=f"{key}_bill", label_visibility="collapsed")
             bill_amt_default = 0.0
-            ocr_date_val     = row_date
 
             if bill_file:
                 bill_data = bill_file.read()
@@ -484,21 +507,18 @@ for i in range(st.session_state.row_count):
                         details = ocr_bill(bill_data, bill_file.name)
                         if details["amount"]:
                             bill_amt_default = details["amount"]
-                            st.markdown(f'<span class="ocr-ok">✓ Detected ₹{details["amount"]:.2f} — verify below</span>', unsafe_allow_html=True)
+                            st.markdown(f'<span class="ocr-ok">✓ Amount: ₹{details["amount"]:.2f} — verify below</span>', unsafe_allow_html=True)
                         else:
                             st.markdown('<span class="ocr-err">⚠ Could not extract amount — enter manually</span>', unsafe_allow_html=True)
                         if details["date"]:
-                            ocr_date_val = details["date"]
-                            st.markdown(f'<span class="ocr-ok">✓ Date detected: {details["date"].strftime("%d/%m/%Y")}</span>', unsafe_allow_html=True)
+                            st.session_state[ocr_date_key] = details["date"]
+                            st.markdown(f'<span class="ocr-ok">✓ Date: {details["date"].strftime("%d/%m/%Y")} — auto-filled above</span>', unsafe_allow_html=True)
+                            row_date = details["date"]
+                        else:
+                            st.markdown('<span class="ocr-err">⚠ Date not found — select manually above</span>', unsafe_allow_html=True)
                     except Exception as e:
                         st.markdown(f'<span class="ocr-err">⚠ OCR error: {e}</span>', unsafe_allow_html=True)
-
                 bill_files_list.append((bill_data, bill_file.name))
-
-                # Update date if OCR found one
-                if ocr_date_val and ocr_date_val != row_date:
-                    st.info(f"📅 Date auto-detected from bill: **{ocr_date_val.strftime('%d/%m/%Y')}** — adjust above if incorrect")
-                    row_date = ocr_date_val
 
             bill_amt = st.number_input("Bill Amount (₹)", min_value=0.0,
                                         value=bill_amt_default, step=0.01, format="%.2f",
@@ -541,15 +561,15 @@ for i in range(st.session_state.row_count):
                     st.markdown(f'<span class="flag-warn">⚠ Exceeds ₹{thr:.0f} limit</span>', unsafe_allow_html=True)
 
         collected_rows.append({
-            "date":         row_date,
-            "acc":          acc_val,
+            "date":           row_date,
+            "acc":            acc_val,
             "mode_of_travel": mode,
-            "remarks":      remarks,
-            "sup_bills":    sup_bills,
-            "team_member":  member,
-            "bill_amount":  bill_amt,
-            "extra":        gpay_amt,
-            "total":        total_amt,
+            "remarks":        remarks,
+            "sup_bills":      sup_bills,
+            "team_member":    member,
+            "bill_amount":    bill_amt,
+            "extra":          gpay_amt,
+            "total":          total_amt,
         })
 
 col_add, col_remove = st.columns([1, 5])
