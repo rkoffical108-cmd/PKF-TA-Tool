@@ -93,7 +93,7 @@ def images_from_bytes(data: bytes, filename: str) -> list:
 
 def extract_amount(text: str) -> Optional[float]:
     cleaned = re.sub(r"(?<=\d),(?=\d{3})", "", text)
-    CURR = r"(?:₹|£|Rs\.?|INR|R[s5]\.?|%|R\[|F(?=\d))"
+    CURR = r"(?:₹|£|Rs\.?|INR|R[s5]\.?|%|~|R\[|F(?=\d))"
 
     # P1 strong keyword + currency prefix
     strong_kw = (
