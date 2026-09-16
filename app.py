@@ -479,54 +479,16 @@ for i in range(st.session_state.row_count):
 
     with st.expander(f"**Row {i+1}**", expanded=True):
 
-        # ── Upload bill FIRST so OCR runs before widgets render ──────────────
-        st.markdown("**Bill (Image / PDF)**")
-        bill_file = st.file_uploader("Upload bill", type=["jpg","jpeg","png","pdf"],
-                                      key=f"{key}_bill", label_visibility="collapsed")
-
-        if bill_file:
-            # Only re-run OCR when a new file is uploaded
-            file_id = f"{bill_file.name}_{bill_file.size}"
-            if st.session_state.get(ss_file) != file_id:
-                bill_data = bill_file.read()
-                with st.spinner("Scanning bill…"):
-                    try:
-                        details = ocr_bill(bill_data, bill_file.name)
-                        st.session_state[ss_amt]  = details.get("amount")
-                        st.session_state[ss_date] = details.get("date")
-                        st.session_state[ss_file] = file_id
-                        # Store bytes for PDF merge
-                        st.session_state[f"{key}_bill_bytes"] = (bill_data, bill_file.name)
-                    except Exception as e:
-                        st.markdown(f'<span class="ocr-err">⚠ OCR error: {e}</span>', unsafe_allow_html=True)
-            else:
-                bill_data = st.session_state.get(f"{key}_bill_bytes", (None,None))[0]
-
-            ocr_amt  = st.session_state.get(ss_amt)
-            ocr_date = st.session_state.get(ss_date)
-            if ocr_amt:
-                st.markdown(f'<span class="ocr-ok">✓ Amount detected: ₹{ocr_amt:.2f}</span>', unsafe_allow_html=True)
-            else:
-                st.markdown('<span class="ocr-err">⚠ Amount not detected — enter manually</span>', unsafe_allow_html=True)
-            if ocr_date:
-                st.markdown(f'<span class="ocr-ok">✓ Date detected: {ocr_date.strftime("%d/%m/%Y")}</span>', unsafe_allow_html=True)
-            else:
-                st.markdown('<span class="ocr-err">⚠ Date not detected — select manually</span>', unsafe_allow_html=True)
-
-            # Track for PDF
-            bdata = st.session_state.get(f"{key}_bill_bytes")
-            if bdata and bdata[0]:
-                bill_files_list.append(bdata)
-        else:
-            ocr_amt  = st.session_state.get(ss_amt)
-            ocr_date = st.session_state.get(ss_date)
-
-        st.divider()
-
-        # ── Row fields ────────────────────────────────────────────────────────
+        # ── Row fields (date, acc head, mode, remarks, member) ───────────────
         rc1, rc2, rc3 = st.columns(3)
         with rc1:
-            row_date = st.date_input("Date", value=ocr_date if ocr_date else None, key=f"{key}_date")
+            # Pre-fill date from OCR if available and widget not yet set by user
+            ocr_date = st.session_state.get(ss_date)
+            date_widget_key = f"{key}_date"
+            # Set widget state directly so it renders with OCR value
+            if ocr_date and date_widget_key not in st.session_state:
+                st.session_state[date_widget_key] = ocr_date
+            row_date = st.date_input("Date", key=date_widget_key)
         with rc2:
             acc_sel = st.selectbox("Accounting Head", ACC_OPTIONS, key=f"{key}_acc")
         with rc3:
@@ -553,33 +515,74 @@ for i in range(st.session_state.row_count):
             else:
                 member = st.text_input("Team Member", placeholder="Add team members in Step 1 first", key=f"{key}_mem")
 
-        # ── Amount fields ─────────────────────────────────────────────────────
+        # ── Bill and GPay uploads SIDE BY SIDE ───────────────────────────────
         bc1, bc2 = st.columns(2)
         with bc1:
+            st.markdown("**Bill (Image / PDF)**")
+            bill_file = st.file_uploader("Upload bill", type=["jpg","jpeg","png","pdf"],
+                                          key=f"{key}_bill", label_visibility="collapsed")
+            ocr_amt = st.session_state.get(ss_amt)
+
+            if bill_file:
+                file_id = f"{bill_file.name}_{bill_file.size}"
+                if st.session_state.get(ss_file) != file_id:
+                    bill_data = bill_file.read()
+                    with st.spinner("Scanning bill…"):
+                        try:
+                            details = ocr_bill(bill_data, bill_file.name)
+                            amt_result  = details.get("amount")
+                            date_result = details.get("date")
+                            st.session_state[ss_amt]  = amt_result
+                            st.session_state[ss_date] = date_result
+                            st.session_state[ss_file] = file_id
+                            st.session_state[f"{key}_bill_bytes"] = (bill_data, bill_file.name)
+                            # Pre-fill date widget directly in session state
+                            if date_result:
+                                st.session_state[f"{key}_date"] = date_result
+                            # Pre-fill amount widget directly in session state
+                            if amt_result:
+                                st.session_state[f"{key}_bill_amt"] = float(amt_result)
+                        except Exception as e:
+                            st.markdown(f'<span class="ocr-err">⚠ OCR error: {e}</span>', unsafe_allow_html=True)
+                    st.rerun()
+
+                ocr_amt  = st.session_state.get(ss_amt)
+                ocr_date = st.session_state.get(ss_date)
+                if ocr_amt:
+                    st.markdown(f'<span class="ocr-ok">✓ Amount: ₹{ocr_amt:.2f}</span>', unsafe_allow_html=True)
+                else:
+                    st.markdown('<span class="ocr-err">⚠ Amount not detected — enter manually</span>', unsafe_allow_html=True)
+                if ocr_date:
+                    st.markdown(f'<span class="ocr-ok">✓ Date: {ocr_date.strftime("%d/%m/%Y")} — filled above</span>', unsafe_allow_html=True)
+                else:
+                    st.markdown('<span class="ocr-err">⚠ Date not detected — select manually</span>', unsafe_allow_html=True)
+
+                bdata = st.session_state.get(f"{key}_bill_bytes")
+                if bdata and bdata[0]:
+                    bill_files_list.append(bdata)
+
             bill_amt = st.number_input("Bill Amount (₹)", min_value=0.0,
-                                        value=float(ocr_amt) if ocr_amt else 0.0,
                                         step=0.01, format="%.2f", key=f"{key}_bill_amt")
+
         with bc2:
             st.markdown("**GPay Screenshot** *(if extra paid)*")
             gpay_file = st.file_uploader("Upload GPay", type=["jpg","jpeg","png"],
                                           key=f"{key}_gpay", label_visibility="collapsed")
-            gpay_amt_default = 0.0
             if gpay_file:
                 gpay_data = gpay_file.read()
                 with st.spinner("Scanning GPay…"):
                     try:
                         amt = ocr_gpay(gpay_data, gpay_file.name)
                         if amt:
-                            gpay_amt_default = amt
-                            st.markdown(f'<span class="ocr-ok">✓ Detected ₹{amt:.2f} — verify below</span>', unsafe_allow_html=True)
+                            st.session_state[f"{key}_gpay_amt"] = float(amt)
+                            st.markdown(f'<span class="ocr-ok">✓ Detected ₹{amt:.2f}</span>', unsafe_allow_html=True)
                         else:
                             st.markdown('<span class="ocr-err">⚠ Could not extract — enter manually</span>', unsafe_allow_html=True)
                     except Exception as e:
                         st.markdown(f'<span class="ocr-err">⚠ OCR error: {e}</span>', unsafe_allow_html=True)
                 bill_files_list.append((gpay_data, gpay_file.name))
             gpay_amt = st.number_input("Extra Amount (₹)", min_value=0.0,
-                                        value=gpay_amt_default, step=0.01, format="%.2f",
-                                        key=f"{key}_gpay_amt")
+                                        step=0.01, format="%.2f", key=f"{key}_gpay_amt")
 
         total_amt = bill_amt + gpay_amt
         st.markdown(f"**Total: ₹ {total_amt:,.2f}**")
