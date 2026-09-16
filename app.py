@@ -340,8 +340,8 @@ def build_excel(header: dict, rows: list, thresholds: dict, thr_enabled: bool) -
         ws2.cell(row,1,l).font = cf(bold=True)
         ws2.cell(row,3,v).font = cf()
 
-    col_hdrs = ["Date","Day","Nature of Expenditure","Bill Amount","Extra",
-                "Total","Sup Bills Y/N","Remarks -Mandatory","Mode of travel-Mandatory","Team members name"]
+    col_hdrs = ["Date","Day","Nature of Expenditure","Bill Amount","GPay",
+                "Claim Value","Sup Bills Y/N","Remarks -Mandatory","Mode of travel-Mandatory","Team members name"]
     for col, h in enumerate(col_hdrs, 1):
         c = ws2.cell(5, col, h)
         c.font = Font(name="Cambria", bold=True, size=10, color="FFFFFF")
@@ -365,7 +365,7 @@ def build_excel(header: dict, rows: list, thresholds: dict, thr_enabled: bool) -
         for col, v in [(4, bill_amt),(5, extra_amt)]:
             c = ws2.cell(er, col, v); c.number_format = "#,##0.00"; c.font = cf()
 
-        tc = ws2.cell(er, 6, f"=D{er}+E{er}")
+        tc = ws2.cell(er, 6, f"=MAX(D{er},E{er})")
         tc.number_format = "#,##0.00"; tc.font = cf()
 
         ws2.cell(er, 7,  r.get("sup_bills","Yes")).font    = cf()
