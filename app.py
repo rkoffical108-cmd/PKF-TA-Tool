@@ -286,7 +286,7 @@ def ocr_bill(data: bytes, filename: str) -> dict:
         for cfg in ["--psm 3 -l eng", "--psm 6 -l eng", "--psm 11 -l eng"]:
             try: full += pytesseract.image_to_string(raw, config=cfg) + "\n"
             except: pass
-    return {"amount": extract_amount(full), "date": extract_date(full)}
+    return {"amount": extract_amount(full), "date": extract_date(full), "_debug_ocr": full[:600]}
 
 
 def ocr_gpay(data: bytes, filename: str) -> Optional[float]:
@@ -611,6 +611,8 @@ for i in range(st.session_state.row_count):
                             st.session_state[ss_date] = date_result
                             st.session_state[ss_file] = file_id
                             st.session_state[f"{key}_bill_bytes"] = (bill_data, bill_file.name)
+                            # Store raw OCR for debug display
+                            st.session_state[f"{ss_file}_debug"] = details.get("_debug_ocr", "")
                             # Inject into widget session state BEFORE widgets render
                             if date_result:
                                 st.session_state[f"{key}_date"] = date_result
@@ -631,6 +633,10 @@ for i in range(st.session_state.row_count):
                     st.markdown(f'<span class="ocr-ok">✓ Date: {ocr_date_val.strftime("%d/%m/%Y")} — filled below</span>', unsafe_allow_html=True)
                 else:
                     st.markdown('<span class="ocr-err">⚠ Date not detected — select manually</span>', unsafe_allow_html=True)
+                    debug_text = st.session_state.get(f"{ss_file}_debug", "")
+                    if debug_text:
+                        with st.expander("🔍 Raw OCR text (for debugging)"):
+                            st.text(debug_text[:500])
 
                 bdata = st.session_state.get(f"{key}_bill_bytes")
                 if bdata and bdata[0]:
