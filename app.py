@@ -280,13 +280,28 @@ def extract_date(text: str) -> Optional[date]:
 
 def ocr_bill(data: bytes, filename: str) -> dict:
     imgs = images_from_bytes(data, filename)
-    full = ""
+    passes = []
     for img in imgs:
         raw = img.convert("RGB")
         for cfg in ["--psm 3 -l eng", "--psm 6 -l eng", "--psm 11 -l eng"]:
-            try: full += pytesseract.image_to_string(raw, config=cfg) + "\n"
+            try:
+                t = pytesseract.image_to_string(raw, config=cfg)
+                passes.append(t)
             except: pass
-    return {"amount": extract_amount(full), "date": extract_date(full), "_debug_ocr": full[:600]}
+
+    # Date: try each PSM pass separately — avoids false matches from concatenation
+    found_date = None
+    for t in passes:
+        found_date = extract_date(t)
+        if found_date:
+            break
+
+    # Amount: use all passes combined for best coverage
+    full = "\n".join(passes)
+    found_amount = extract_amount(full)
+
+    debug = passes[1][:600] if len(passes) > 1 else full[:600]
+    return {"amount": found_amount, "date": found_date, "_debug_ocr": debug}
 
 
 def ocr_gpay(data: bytes, filename: str) -> Optional[float]:
