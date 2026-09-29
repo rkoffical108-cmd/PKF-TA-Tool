@@ -93,7 +93,7 @@ def images_from_bytes(data: bytes, filename: str) -> list:
 
 def extract_amount(text: str) -> Optional[float]:
     cleaned = re.sub(r"(?<=\d),(?=\d{3})", "", text)
-    CURR = r"(?:₹|£|Rs\.?|INR|R[s5]\.?|%|~|R\[|F(?=\d))"
+    CURR = r"(?:₹|£|Rs\.?|INR|R[s5]\.?|%|~|\*|R\[|F(?=\d))"
 
     # P1 strong keyword + currency prefix
     strong_kw = (
@@ -148,6 +148,23 @@ def _safe_float(s):
 
 
 def extract_date(text: str) -> Optional[date]:
+    """
+    Comprehensive date extraction covering all bill types encountered:
+
+    LABELLED PATTERNS (searched first — most reliable):
+      - "Date: 23/09/26"          → DD/MM/YY  (restaurant bills)
+      - "Date: 16/09/2026"        → DD/MM/YYYY (restaurant bills)
+      - "Date: 01 Jul 2026"       → DD Mon YYYY (some invoices)
+      - "Order delivered on 31 Jul 2026" → Swiggy/Zomato
+      - "Delivered, 1 Item, ₹214" (header line — date from "delivered on" below)
+      - "01 Jul 2026 • 09:42 AM"  → Rapido/Ola (date right below ride type)
+      - "1st Jul 26, 10:12 am"    → BHIM/UPI (ordinal day, 2-digit year)
+
+    UNLABELLED PATTERNS (fallback):
+      - DD/MM/YYYY, DD/MM/YY, YYYY-MM-DD anywhere in text
+      - "Mon, DD YYYY" → Uber format (top right corner)
+      - "Mon DD" with no year → infer current year (GPay, Swiggy)
+    """
     months = {
         "jan":1,"feb":2,"mar":3,"apr":4,"may":5,"jun":6,
         "jul":7,"aug":8,"sep":9,"oct":10,"nov":11,"dec":12,
@@ -156,33 +173,108 @@ def extract_date(text: str) -> Optional[date]:
         "october":10,"november":11,"december":12,
     }
     cy = date.today().year
-    patterns = [
-        (r"\b(\d{1,2})\s+([A-Za-z]{3,9})\s+(20\d{2})\b",       "dmy"),
-        (r"\b([A-Za-z]{3,9})\s+(\d{1,2})[,\s]+(20\d{2})\b",    "mdy"),
-        (r"\b(20\d{2})[/\-](\d{2})[/\-](\d{2})\b",              "ymd"),
-        (r"\b(\d{2})[/\-\.](\d{2})[/\-\.](20\d{2})\b",          "dmy_num"),
-        (r"\b([A-Za-z]{3,9})\s+(\d{1,2})(?:[,\s]|$)",           "md_noyear"),
+
+    def _make(day, mon, year):
+        if mon and 1 <= mon <= 12 and 1 <= day <= 31 and 2000 <= year <= 2099:
+            try: return date(year, mon, day)
+            except: pass
+        return None
+
+    def _mon(s): return months.get(s.lower()) if s and s.isalpha() else None
+
+    def _2yr(s): return 2000 + int(s)  # "26" → 2026
+
+    def _ord(s):
+        # "1st" "2nd" "3rd" "31st" → integer
+        return int(re.sub(r"(st|nd|rd|th)$", "", s.strip(), flags=re.IGNORECASE))
+
+    # ── PRIORITY 1: labelled date patterns ───────────────────────────────────
+    labelled = [
+        # "Order delivered on 31 Jul 2026" / "Delivered on July 17, 2026"
+        (r"(?:order\s+)?delivered\s+on\s+(\d{1,2})\s+([A-Za-z]{3,9})\s+(20\d{2})",
+         lambda g: _make(int(g[0]), _mon(g[1]), int(g[2]))),
+        # "Order Placed at / Order Arrived at" — date on next line
+        (r"(?:order\s+placed\s+at|order\s+arrived\s+at|placed\s+at|ordered\s+at)\s+(\d{1,2})\s+([A-Za-z]{3,9})\s+(20\d{2})",
+         lambda g: _make(int(g[0]), _mon(g[1]), int(g[2]))),
+
+        # "Date: 23/09/26" or "Date : 23/09/26"
+        (r"[Dd]ate\s*[:\-]\s*(\d{1,2})[/\-\.](\d{2})[/\-\.](\d{2})(?!\d)",
+         lambda g: _make(int(g[0]), int(g[1]), _2yr(g[2]))),
+
+        # "Date: 16/09/2026"
+        (r"[Dd]ate\s*[:\-]\s*(\d{1,2})[/\-\.](\d{2})[/\-\.](20\d{2})",
+         lambda g: _make(int(g[0]), int(g[1]), int(g[2]))),
+
+        # "Date: 01 Jul 2026"
+        (r"[Dd]ate\s*[:\-]\s*(\d{1,2})\s+([A-Za-z]{3,9})\s+(20\d{2})",
+         lambda g: _make(int(g[0]), _mon(g[1]), int(g[2]))),
+
+        # "1st Jul 26, 10:12 am" — BHIM ordinal + 2-digit year
+        (r"(\d{1,2})(?:st|nd|rd|th)\s+([A-Za-z]{3,9})\s+(\d{2})\s*,\s*\d{1,2}:\d{2}",
+         lambda g: _make(int(g[0]), _mon(g[1]), _2yr(g[2]))),
+
+        # Uber: "Mon, DD YYYY HH:MM" e.g. "Jul, 01 2026 9:40 PM"
+        (r"([A-Za-z]{3,9}),?\s+(\d{1,2})\s+(20\d{2})\s+\d{1,2}:\d{2}",
+         lambda g: _make(int(g[1]), _mon(g[0]), int(g[2]))),
+
+        # "Time of ride: DD Mon YYYY" or similar ride labels
+        (r"(?:time\s+of\s+ride|ride\s+date|trip\s+date)[^\d]{0,20}(\d{1,2})\s+([A-Za-z]{3,9})\s+(20\d{2})",
+         lambda g: _make(int(g[0]), _mon(g[1]), int(g[2]))),
     ]
-    for pat, fmt in patterns:
+
+    for pat, fn in labelled:
+        m = re.search(pat, text, re.IGNORECASE)
+        if m:
+            result = fn(m.groups())
+            if result:
+                return result
+
+    # ── PRIORITY 2: unlabelled numeric patterns ───────────────────────────────
+    numeric = [
+        # YYYY-MM-DD or YYYY/MM/DD
+        (r"(20\d{2})[/\-](\d{2})[/\-](\d{2})",
+         lambda g: _make(int(g[2]), int(g[1]), int(g[0]))),
+
+        # DD/MM/YYYY
+        (r"(\d{2})[/\-\.](\d{2})[/\-\.](20\d{2})",
+         lambda g: _make(int(g[0]), int(g[1]), int(g[2]))),
+
+        # DD/MM/YY (2-digit year)
+        (r"(\d{2})[/\-\.](\d{2})[/\-\.]([2-9]\d)",
+         lambda g: _make(int(g[0]), int(g[1]), _2yr(g[2]))),
+    ]
+
+    for pat, fn in numeric:
         for m in re.finditer(pat, text, re.IGNORECASE):
-            try:
-                g = m.groups()
-                if fmt == "dmy":
-                    day, mon, year = int(g[0]), months.get(g[1].lower()), int(g[2])
-                elif fmt == "mdy":
-                    mon, day, year = months.get(g[0].lower()), int(g[1]), int(g[2])
-                elif fmt == "ymd":
-                    year, mon, day = int(g[0]), int(g[1]), int(g[2])
-                elif fmt == "dmy_num":
-                    day, mon, year = int(g[0]), int(g[1]), int(g[2])
-                elif fmt == "md_noyear":
-                    mon, day, year = months.get(g[0].lower()), int(g[1]), cy
-                else:
-                    continue
-                if mon and 1 <= mon <= 12 and 1 <= day <= 31 and 2000 <= year <= 2099:
-                    return date(year, mon, day)
-            except (ValueError, TypeError):
-                pass
+            result = fn(m.groups())
+            if result:
+                return result
+
+    # ── PRIORITY 3: unlabelled month-name patterns ────────────────────────────
+    monthname = [
+        # "01 Jul 2026" or "1 July 2026"
+        (r"(\d{1,2})\s+([A-Za-z]{3,9})\s+(20\d{2})",
+         lambda g: _make(int(g[0]), _mon(g[1]), int(g[2]))),
+
+        # "Jul 01, 2026" or "July 1 2026"
+        (r"([A-Za-z]{3,9})\s+(\d{1,2})[,\s]+(20\d{2})",
+         lambda g: _make(int(g[1]), _mon(g[0]), int(g[2]))),
+
+        # "July 17, 5:22 PM" — month+day no year (Swiggy)
+        (r"([A-Za-z]{3,9})\s+(\d{1,2})\s*,\s*\d{1,2}:\d{2}",
+         lambda g: _make(int(g[1]), _mon(g[0]), cy)),
+
+        # "July 17" alone on a line
+        (r"([A-Za-z]{3,9})\s+(\d{1,2})(?:[,\s]|$)",
+         lambda g: _make(int(g[1]), _mon(g[0]), cy)),
+    ]
+
+    for pat, fn in monthname:
+        for m in re.finditer(pat, text, re.IGNORECASE):
+            result = fn(m.groups())
+            if result:
+                return result
+
     return None
 
 
