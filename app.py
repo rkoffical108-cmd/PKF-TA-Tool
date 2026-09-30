@@ -291,6 +291,31 @@ def extract_date(text: str) -> Optional[date]:
 
 
 def ocr_bill(data: bytes, filename: str) -> dict:
+    import subprocess, tempfile, os
+
+    # For PDFs: try pdftotext first (faster, more accurate for digital PDFs)
+    # Fall back to image OCR for scanned/image-based PDFs
+    pdf_text = ""
+    if filename.lower().endswith(".pdf"):
+        try:
+            tmp_pdf = tempfile.mktemp(suffix=".pdf")
+            with open(tmp_pdf, "wb") as f:
+                f.write(data)
+            r = subprocess.run(["pdftotext", tmp_pdf, "-"],
+                               capture_output=True, text=True, timeout=15)
+            os.unlink(tmp_pdf)
+            if r.returncode == 0 and len(r.stdout.strip()) > 20:
+                pdf_text = r.stdout
+        except Exception:
+            pass
+
+    if pdf_text:
+        return {
+            "amount": extract_amount(pdf_text),
+            "date":   extract_date(pdf_text),
+            "_debug_ocr": pdf_text[:600],
+        }
+
     imgs = images_from_bytes(data, filename)
     passes = []
     for img in imgs:
