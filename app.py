@@ -365,19 +365,33 @@ def ocr_gpay(data: bytes, filename: str) -> Optional[float]:
     top_crop = img.crop((0, 0, w, int(h * 0.40)))
     top_crop = top_crop.resize((w * 3, int(h * 0.40) * 3), Image.LANCZOS)
 
+    MISREAD_DIGITS = {"2","7","6","8","9","3","4"}
+
+    def _strip_misread(v):
+        """Strip leading misread ₹ digit from integer amounts e.g. 2400 → 400."""
+        if v == int(v):
+            s = str(int(v))
+            if len(s) >= 4 and s[0] in MISREAD_DIGITS:
+                stripped = float(s[1:])
+                if 50 <= stripped <= 9999:
+                    return stripped
+        return v
+
     def _scan_for_amount(pil_img):
         grey = pil_img.convert("L")
-        # Try normal and inverted (for white text on dark bg)
+        # Try normal and inverted (for white text on dark bg like BHIM green)
         for variant in [grey, Image.fromarray(255 - __import__("numpy").array(grey))]:
             try:
                 text = pytesseract.image_to_string(variant, config="--psm 3 -l eng")
                 for line in text.split("\n"):
                     line = line.strip()
-                    # Remove currency symbols and commas
-                    line_clean = re.sub(r"[₹£%,Rs\.INR]", "", line).strip()
+                    # Remove known currency symbols before matching
+                    line_clean = re.sub(r"[₹£%~\*=,]|Rs\.?|INR", "", line).strip()
                     m = re.fullmatch(r"([0-9]+(?:\.[0-9]{1,2})?)", line_clean)
                     if m:
                         v = float(m.group(1))
+                        # Apply misread-prefix strip (₹ merged with first digit)
+                        v = _strip_misread(v)
                         if 50 <= v <= 99999:
                             return v
             except Exception:
