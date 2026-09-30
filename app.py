@@ -92,6 +92,10 @@ def images_from_bytes(data: bytes, filename: str) -> list:
 
 
 def extract_amount(text: str) -> Optional[float]:
+    def _safe_float(s):
+        try: return float(s)
+        except: return 0
+
     # Remove commas in numbers and negative-prefixed amounts
     # Negative amounts (Promotion -₹1.53, Uber credits -₹50.38) must be excluded
     cleaned = re.sub(r"(?<=\d),(?=\d{3})", "", text)
