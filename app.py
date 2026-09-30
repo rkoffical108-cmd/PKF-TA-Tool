@@ -1,4 +1,4 @@
-"""
+"""  v2.1
 PKF TA Claim Tool — Streamlit version
 Runs on Streamlit Community Cloud (always-on, free)
 """
@@ -198,7 +198,7 @@ def extract_date(text: str) -> Optional[date]:
          lambda g: _make(int(g[0]), _mon(g[1]), int(g[2]))),
 
         # "Date: 23/09/26" or "Date : 23/09/26"
-        (r"[Dd]ate\s*[:\-]\s*(\d{1,2})[/\-\.](\d{2})[/\-\.](\d{2})(?!\d)",
+        (r"[Dd]ate\s*[:\-]\s*(\d{1,2})[/\-\.](\d{2})[/\-\.](\d{2})(?!\d)",
          lambda g: _make(int(g[0]), int(g[1]), _2yr(g[2]))),
 
         # "Date: 16/09/2026"
@@ -244,10 +244,12 @@ def extract_date(text: str) -> Optional[date]:
          lambda g: _make(int(g[0]), int(g[1]), _2yr(g[2]))),
     ]
 
+    today = date.today()
     for pat, fn in numeric:
         for m in re.finditer(pat, text, re.IGNORECASE):
             result = fn(m.groups())
-            if result:
+            # Skip today's date — it comes from device UI/status bar, not the bill
+            if result and result != today:
                 return result
 
     # ── PRIORITY 3: unlabelled month-name patterns ────────────────────────────
@@ -286,21 +288,31 @@ def ocr_bill(data: bytes, filename: str) -> dict:
         for cfg in ["--psm 3 -l eng", "--psm 6 -l eng", "--psm 11 -l eng"]:
             try:
                 t = pytesseract.image_to_string(raw, config=cfg)
-                passes.append(t)
+                # Strip any accidental UI text that sneaks in via screenshot
+                # (Streamlit page elements often contain "Date", "Bill Amount" etc.)
+                # Keep only lines that don't look like UI widget labels
+                ui_labels = {"gpay screenshot","bill amount","extra amount","gpay value",
+                             "accounting head","mode of travel","sup. bills",
+                             "team member","generate output","add row","remove"}
+                clean_lines = []
+                for line in t.split("\n"):
+                    if line.strip().lower() not in ui_labels:
+                        clean_lines.append(line)
+                passes.append("\n".join(clean_lines))
             except: pass
 
-    # Date: try each PSM pass separately — avoids false matches from concatenation
+    # Date: try PSM 3 first (cleanest), then others
     found_date = None
     for t in passes:
         found_date = extract_date(t)
         if found_date:
             break
 
-    # Amount: use all passes combined for best coverage
+    # Amount: use all passes combined
     full = "\n".join(passes)
     found_amount = extract_amount(full)
 
-    debug = passes[1][:600] if len(passes) > 1 else full[:600]
+    debug = passes[0][:600] if passes else ""
     return {"amount": found_amount, "date": found_date, "_debug_ocr": debug}
 
 
