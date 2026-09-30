@@ -92,79 +92,82 @@ def images_from_bytes(data: bytes, filename: str) -> list:
 
 
 def extract_amount(text: str) -> Optional[float]:
+    # Remove commas in numbers and negative-prefixed amounts
+    # Negative amounts (Promotion -₹1.53, Uber credits -₹50.38) must be excluded
     cleaned = re.sub(r"(?<=\d),(?=\d{3})", "", text)
-    CURR = r"(?:₹|£|\$|Rs\.?|INR|R[s5]\.?|(?<!\d)%|~|\*|=|R\[|F(?=\d))"
+    # Remove lines with negative amounts so they don't get matched
+    cleaned = re.sub(r"-\s*(?:₹|£|\$|Rs\.?|INR|R[s5]\.?|(?<!\d)%|~|\*|=)[\s\d\.]+", "", cleaned)
 
-    # P1 strong keyword + currency prefix
+    CURR = r"(?:₹|£|\$|Rs\.?|INR|R[s5]\.?|(?<!\d)%|~|\*|=|R\[|F(?=\d))"
+    MISREAD = {"2","7","6","8","9","3","4"}
+
+    def _strip(candidates):
+        out = []
+        for v in candidates:
+            # Only strip misread-prefix from INTEGER amounts
+            # e.g. ₹480 → "2480" (integer). NOT for "961.07" (decimal is real amount)
+            if v == int(v):
+                s = str(int(v))
+                if len(s) >= 4 and s[0] in MISREAD:
+                    stripped = float(s[1:])
+                    if 50 <= stripped <= 9999:
+                        out.append(stripped); continue
+            out.append(v)
+        return out
+
+    # P1: Strong keyword + currency prefix (most reliable)
+    # Includes "Total" alone on a line (Uber format) via MULTILINE
     strong_kw = (
         r"(?:grand\s*total|total\s*amount|amount\s*payable|net\s*payable"
         r"|net\s*total|bill\s*total|payable\s*amount|selected\s*price|total\s*fare"
-        r"|^total$)"
+        r"|^total)"
         r"[^\d]{0,30}" + CURR + r"\s*([0-9]+(?:\.[0-9]{1,2})?)"
     )
-    p1 = [float(m.group(1)) for m in re.finditer(strong_kw, cleaned, re.IGNORECASE)
+    p1 = [float(m.group(1)) for m in re.finditer(strong_kw, cleaned, re.IGNORECASE | re.MULTILINE)
           if 1 <= _safe_float(m.group(1)) <= 999999]
-    if p1: return p1[-1]
+    if p1: return _strip(p1)[-1]
 
-    # P2 last currency-prefixed amount
+    # P1b: "Total" keyword adjacent to number (no CURR prefix) — Uber: "Total ~910.07"
+    # where ~ is before the number but Total is the keyword
+    p1b = [float(m.group(1)) for m in re.finditer(
+           r"^total\s+[^\d]{0,5}([0-9]+(?:\.[0-9]{1,2})?)",
+           cleaned, re.IGNORECASE | re.MULTILINE)
+           if 1 <= _safe_float(m.group(1)) <= 999999]
+    if p1b: return _strip(p1b)[-1]
+
+    # P2: Last currency-prefixed amount (excludes negatives via cleaned text)
     p2 = [float(m.group(1)) for m in re.finditer(
           CURR + r"\s*([0-9]+(?:\.[0-9]{1,2})?)", cleaned, re.IGNORECASE)
           if 1 <= _safe_float(m.group(1)) <= 999999]
-    if p2: return p2[-1]
+    if p2: return _strip(p2)[-1]
 
-    # P3 last keyword-adjacent (includes Uber Total, Rapido Selected Price)
+    # P3: Last keyword-adjacent amount
     p3 = [float(m.group(1)) for m in re.finditer(
           r"(?:total|amount|grand\s*total|net\s*amount|paid|payable|fare|selected\s*price)"
           r"[^\d]{0,30}([0-9]+(?:\.[0-9]{1,2})?)", cleaned, re.IGNORECASE)
           if 1 <= _safe_float(m.group(1)) <= 999999]
+    if p3: return _strip(p3)[-1]
 
-    # P4 last standalone number
+    # P4: Last plausible standalone number
     p4 = [float(m.group(1)) for m in re.finditer(r"\b([0-9]{2,6}(?:\.[0-9]{1,2})?)\b", cleaned)
           if 10 <= _safe_float(m.group(1)) <= 99999]
-
-    # Strip leading misread-prefix digit: Tesseract reads ₹ as 2/7/6/9 etc.
-    # e.g. ₹480 → "2480" (4 digits). Strip first digit if result is 50–9999.
-    # Only applies to 4+ digit numbers where stripping gives a plausible amount.
-    MISREAD = {"2","7","6","8","9","3","4"}
-    def _strip(candidates):
-        out = []
-        for v in candidates:
-            s = str(int(v)) if v == int(v) else str(v)
-            if len(s) >= 4 and s[0] in MISREAD:
-                stripped = float(s[1:])
-                if 50 <= stripped <= 9999:
-                    out.append(stripped)
-                    continue
-            out.append(v)
-        return out
-
-    if p3: return _strip(p3)[-1]
     if p4: return _strip(p4)[-1]
     return None
 
 
-def _safe_float(s):
-    try: return float(s)
-    except: return 0
-
 
 def extract_date(text: str) -> Optional[date]:
     """
-    Comprehensive date extraction covering all bill types encountered:
-
-    LABELLED PATTERNS (searched first — most reliable):
-      - "Date: 23/09/26"          → DD/MM/YY  (restaurant bills)
-      - "Date: 16/09/2026"        → DD/MM/YYYY (restaurant bills)
-      - "Date: 01 Jul 2026"       → DD Mon YYYY (some invoices)
-      - "Order delivered on 31 Jul 2026" → Swiggy/Zomato
-      - "Delivered, 1 Item, ₹214" (header line — date from "delivered on" below)
-      - "01 Jul 2026 • 09:42 AM"  → Rapido/Ola (date right below ride type)
-      - "1st Jul 26, 10:12 am"    → BHIM/UPI (ordinal day, 2-digit year)
-
-    UNLABELLED PATTERNS (fallback):
-      - DD/MM/YYYY, DD/MM/YY, YYYY-MM-DD anywhere in text
-      - "Mon, DD YYYY" → Uber format (top right corner)
-      - "Mon DD" with no year → infer current year (GPay, Swiggy)
+    Comprehensive date extraction covering all bill types:
+    - Restaurant: Date: DD/MM/YY or DD/MM/YYYY
+    - Rapido JPG: DD Mon YYYY below ride type
+    - Rapido PDF: Time of Ride Jun 16th 2026
+    - Swiggy/Zomato: Order delivered on DD Mon YYYY
+    - Swiggy no year: July 17, 5:22 PM
+    - BHIM: 1st Jul 26, 10:12 am
+    - Uber PDF: Sept 12, 2026 top right
+    - Uber payment: Cash 9/12/26 03:55 pm (MM/DD/YY)
+    - Order Placed at DD Mon YYYY
     """
     months = {
         "jan":1,"feb":2,"mar":3,"apr":4,"may":5,"jun":6,
@@ -182,64 +185,53 @@ def extract_date(text: str) -> Optional[date]:
         return None
 
     def _mon(s): return months.get(s.lower()) if s and s.isalpha() else None
+    def _2yr(s): return 2000 + int(s)
 
-    def _2yr(s): return 2000 + int(s)  # "26" → 2026
-
-    def _ord(s):
-        # "1st" "2nd" "3rd" "31st" → integer
-        return int(re.sub(r"(st|nd|rd|th)$", "", s.strip(), flags=re.IGNORECASE))
-
-    # ── PRIORITY 1: labelled date patterns ───────────────────────────────────
+    # ── PRIORITY 1: labelled date patterns ──────────────────────────────────
     labelled = [
-        # "Order delivered on 31 Jul 2026" / "Delivered on July 17, 2026"
+        # Swiggy/Zomato: "Order delivered on 31 Jul 2026"
         (r"(?:order\s+)?delivered\s+on\s+(\d{1,2})\s+([A-Za-z]{3,9})\s+(20\d{2})",
          lambda g: _make(int(g[0]), _mon(g[1]), int(g[2]))),
-        # "Order Placed at / Order Arrived at" — date on next line
+
+        # Order Placed at / Order Arrived at
         (r"(?:order\s+placed\s+at|order\s+arrived\s+at|placed\s+at|ordered\s+at)\s+(\d{1,2})\s+([A-Za-z]{3,9})\s+(20\d{2})",
          lambda g: _make(int(g[0]), _mon(g[1]), int(g[2]))),
 
-        # Rapido/Ola: "Auto Ride\n01 Jul 2026 • 09:02 AM"
-        # Date appears right after ride type line, followed by bullet/time
+        # Rapido JPG: "Auto Ride\n01 Jul 2026"
         (r"(?:auto\s+ride|cab\s+ride|bike\s+ride|auto\s+priority|prime\s+ride)\s+(\d{1,2})\s+([A-Za-z]{3,9})\s+(20\d{2})",
          lambda g: _make(int(g[0]), _mon(g[1]), int(g[2]))),
 
-        # "Date: 23/09/26" or "Date : 23/09/26"
-        (r"[Dd]ate\s*[:\-]\s*(\d{1,2})[/\-\.](\d{2})[/\-\.](\d{2})(?!\d)",
-         lambda g: _make(int(g[0]), int(g[1]), _2yr(g[2]))),
-
-        # "Date: 16/09/2026"
-        (r"[Dd]ate\s*[:\-]\s*(\d{1,2})[/\-\.](\d{2})[/\-\.](20\d{2})",
-         lambda g: _make(int(g[0]), int(g[1]), int(g[2]))),
-
-        # "Date: 01 Jul 2026"
-        (r"[Dd]ate\s*[:\-]\s*(\d{1,2})\s+([A-Za-z]{3,9})\s+(20\d{2})",
-         lambda g: _make(int(g[0]), _mon(g[1]), int(g[2]))),
-
-        # "1st Jul 26, 10:12 am" — BHIM ordinal + 2-digit year
-        (r"(\d{1,2})(?:st|nd|rd|th)\s+([A-Za-z]{3,9})\s+(\d{2})\s*,\s*\d{1,2}:\d{2}",
-         lambda g: _make(int(g[0]), _mon(g[1]), _2yr(g[2]))),
-
-        # Uber: "Mon, DD YYYY HH:MM" e.g. "Jul, 01 2026 9:40 PM"
-        (r"([A-Za-z]{3,9}),?\s+(\d{1,2})\s+(20\d{2})\s+\d{1,2}:\d{2}",
-         lambda g: _make(int(g[1]), _mon(g[0]), int(g[2]))),
-
-        # "Time of ride: DD Mon YYYY" or similar ride labels
-        (r"(?:time\s+of\s+ride|ride\s+date|trip\s+date)[^\d]{0,20}(\d{1,2})\s+([A-Za-z]{3,9})\s+(20\d{2})",
-         lambda g: _make(int(g[0]), _mon(g[1]), int(g[2]))),
-
-        # Rapido PDF: "Time of Ride    Jun 16th 2026, 6:39 PM"
-        # Ordinal day with full month name
+        # Rapido PDF: "Time of Ride    Jun 16th 2026"
         (r"(?:time\s+of\s+ride|ride\s+time)\s+([A-Za-z]{3,9})\s+(\d{1,2})(?:st|nd|rd|th)\s+(20\d{2})",
          lambda g: _make(int(g[1]), _mon(g[0]), int(g[2]))),
 
-        # Uber PDF: "Sept 12, 2026" or "Aug 21, 2026" top-right corner
-        # Format: Mon DD, YYYY (no time on same line)
-        (r"^([A-Za-z]{3,9})\s+(\d{1,2}),?\s+(20\d{2})\s*$",
+        # Restaurant: "Date: 23/09/26"
+        (r"[Dd]ate\s*[:\-]\s*(\d{1,2})[/\-\.](\d{2})[/\-\.](\d{2})(?!\d)",
+         lambda g: _make(int(g[0]), int(g[1]), _2yr(g[2]))),
+
+        # Restaurant: "Date: 16/09/2026"
+        (r"[Dd]ate\s*[:\-]\s*(\d{1,2})[/\-\.](\d{2})[/\-\.](20\d{2})",
+         lambda g: _make(int(g[0]), int(g[1]), int(g[2]))),
+
+        # Restaurant: "Date: 01 Jul 2026"
+        (r"[Dd]ate\s*[:\-]\s*(\d{1,2})\s+([A-Za-z]{3,9})\s+(20\d{2})",
+         lambda g: _make(int(g[0]), _mon(g[1]), int(g[2]))),
+
+        # BHIM: "1st Jul 26, 10:12 am"
+        (r"(\d{1,2})(?:st|nd|rd|th)\s+([A-Za-z]{3,9})\s+(\d{2})\s*,\s*\d{1,2}:\d{2}",
+         lambda g: _make(int(g[0]), _mon(g[1]), _2yr(g[2]))),
+
+        # Uber PDF top right: "Sept 12, 2026" or "Aug 21, 2026"
+        (r"\b([A-Za-z]{3,9})\s+(\d{1,2}),\s+(20\d{2})\b",
          lambda g: _make(int(g[1]), _mon(g[0]), int(g[2]))),
 
-        # Uber PDF fallback: "Sept 12, 2026" anywhere
-        (r"([A-Za-z]{3,9})\s+(\d{1,2}),\s+(20\d{2})",
-         lambda g: _make(int(g[1]), _mon(g[0]), int(g[2]))),
+        # Uber payment: "Cash 9/12/26 03:55 pm" — MM/DD/YY
+        (r"(?:Cash|Payment|UPI|Card)\s+(\d{1,2})/(\d{2})/(\d{2})\s+\d{1,2}:\d{2}",
+         lambda g: _make(int(g[1]), int(g[0]), _2yr(g[2]))),
+
+        # Time of ride label
+        (r"(?:time\s+of\s+ride|ride\s+date|trip\s+date)[^\d]{0,20}(\d{1,2})\s+([A-Za-z]{3,9})\s+(20\d{2})",
+         lambda g: _make(int(g[0]), _mon(g[1]), int(g[2]))),
     ]
 
     for pat, fn in labelled:
@@ -249,45 +241,39 @@ def extract_date(text: str) -> Optional[date]:
             if result:
                 return result
 
-    # ── PRIORITY 2: unlabelled numeric patterns ───────────────────────────────
+    # ── PRIORITY 2: unlabelled numeric patterns ──────────────────────────────
+    today = date.today()
     numeric = [
-        # YYYY-MM-DD or YYYY/MM/DD
-        (r"(20\d{2})[/\-](\d{2})[/\-](\d{2})",
+        # YYYY-MM-DD
+        (r"\b(20\d{2})[/\-](\d{2})[/\-](\d{2})\b",
          lambda g: _make(int(g[2]), int(g[1]), int(g[0]))),
-
         # DD/MM/YYYY
-        (r"(\d{2})[/\-\.](\d{2})[/\-\.](20\d{2})",
+        (r"\b(\d{2})[/\-\.](\d{2})[/\-\.](20\d{2})\b",
          lambda g: _make(int(g[0]), int(g[1]), int(g[2]))),
-
-        # DD/MM/YY (2-digit year)
-        (r"(\d{2})[/\-\.](\d{2})[/\-\.]([2-9]\d)",
+        # DD/MM/YY
+        (r"\b(\d{2})[/\-\.](\d{2})[/\-\.]([2-9]\d)\b",
          lambda g: _make(int(g[0]), int(g[1]), _2yr(g[2]))),
     ]
 
-    today = date.today()
     for pat, fn in numeric:
         for m in re.finditer(pat, text, re.IGNORECASE):
             result = fn(m.groups())
-            # Skip today's date — it comes from device UI/status bar, not the bill
             if result and result != today:
                 return result
 
-    # ── PRIORITY 3: unlabelled month-name patterns ────────────────────────────
+    # ── PRIORITY 3: unlabelled month-name patterns ───────────────────────────
     monthname = [
-        # "01 Jul 2026" or "1 July 2026"
-        (r"(\d{1,2})\s+([A-Za-z]{3,9})\s+(20\d{2})",
+        # DD Mon YYYY
+        (r"\b(\d{1,2})\s+([A-Za-z]{3,9})\s+(20\d{2})\b",
          lambda g: _make(int(g[0]), _mon(g[1]), int(g[2]))),
-
-        # "Jul 01, 2026" or "July 1 2026"
-        (r"([A-Za-z]{3,9})\s+(\d{1,2})[,\s]+(20\d{2})",
+        # Mon DD, YYYY
+        (r"\b([A-Za-z]{3,9})\s+(\d{1,2})[,\s]+(20\d{2})\b",
          lambda g: _make(int(g[1]), _mon(g[0]), int(g[2]))),
-
-        # "July 17, 5:22 PM" — month+day no year (Swiggy)
-        (r"([A-Za-z]{3,9})\s+(\d{1,2})\s*,\s*\d{1,2}:\d{2}",
+        # Mon DD, HH:MM (no year — Swiggy)
+        (r"\b([A-Za-z]{3,9})\s+(\d{1,2})\s*,\s*\d{1,2}:\d{2}",
          lambda g: _make(int(g[1]), _mon(g[0]), cy)),
-
-        # "July 17" alone on a line
-        (r"([A-Za-z]{3,9})\s+(\d{1,2})(?:[,\s]|$)",
+        # Mon DD alone
+        (r"\b([A-Za-z]{3,9})\s+(\d{1,2})(?:[,\s]|$)",
          lambda g: _make(int(g[1]), _mon(g[0]), cy)),
     ]
 
