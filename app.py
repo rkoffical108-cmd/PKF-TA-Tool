@@ -93,12 +93,13 @@ def images_from_bytes(data: bytes, filename: str) -> list:
 
 def extract_amount(text: str) -> Optional[float]:
     cleaned = re.sub(r"(?<=\d),(?=\d{3})", "", text)
-    CURR = r"(?:₹|£|Rs\.?|INR|R[s5]\.?|(?<!\d)%|~|\*|R\[|F(?=\d))"
+    CURR = r"(?:₹|£|\$|Rs\.?|INR|R[s5]\.?|(?<!\d)%|~|\*|=|R\[|F(?=\d))"
 
     # P1 strong keyword + currency prefix
     strong_kw = (
         r"(?:grand\s*total|total\s*amount|amount\s*payable|net\s*payable"
-        r"|net\s*total|bill\s*total|payable\s*amount)"
+        r"|net\s*total|bill\s*total|payable\s*amount|selected\s*price|total\s*fare"
+        r"|^total$)"
         r"[^\d]{0,30}" + CURR + r"\s*([0-9]+(?:\.[0-9]{1,2})?)"
     )
     p1 = [float(m.group(1)) for m in re.finditer(strong_kw, cleaned, re.IGNORECASE)
@@ -111,12 +112,11 @@ def extract_amount(text: str) -> Optional[float]:
           if 1 <= _safe_float(m.group(1)) <= 999999]
     if p2: return p2[-1]
 
-    # P3 last keyword-adjacent
+    # P3 last keyword-adjacent (includes Uber Total, Rapido Selected Price)
     p3 = [float(m.group(1)) for m in re.finditer(
-          r"(?:total|amount|grand\s*total|net\s*amount|paid|payable|fare)"
-          r"[^\d]{0,20}([0-9]+(?:\.[0-9]{1,2})?)", cleaned, re.IGNORECASE)
+          r"(?:total|amount|grand\s*total|net\s*amount|paid|payable|fare|selected\s*price)"
+          r"[^\d]{0,30}([0-9]+(?:\.[0-9]{1,2})?)", cleaned, re.IGNORECASE)
           if 1 <= _safe_float(m.group(1)) <= 999999]
-    if p3: return p3[-1]
 
     # P4 last standalone number
     p4 = [float(m.group(1)) for m in re.finditer(r"\b([0-9]{2,6}(?:\.[0-9]{1,2})?)\b", cleaned)
@@ -138,6 +138,7 @@ def extract_amount(text: str) -> Optional[float]:
             out.append(v)
         return out
 
+    if p3: return _strip(p3)[-1]
     if p4: return _strip(p4)[-1]
     return None
 
@@ -167,7 +168,7 @@ def extract_date(text: str) -> Optional[date]:
     """
     months = {
         "jan":1,"feb":2,"mar":3,"apr":4,"may":5,"jun":6,
-        "jul":7,"aug":8,"sep":9,"oct":10,"nov":11,"dec":12,
+        "jul":7,"aug":8,"sep":9,"sept":9,"oct":10,"nov":11,"dec":12,
         "january":1,"february":2,"march":3,"april":4,
         "june":6,"july":7,"august":8,"september":9,
         "october":10,"november":11,"december":12,
@@ -197,6 +198,11 @@ def extract_date(text: str) -> Optional[date]:
         (r"(?:order\s+placed\s+at|order\s+arrived\s+at|placed\s+at|ordered\s+at)\s+(\d{1,2})\s+([A-Za-z]{3,9})\s+(20\d{2})",
          lambda g: _make(int(g[0]), _mon(g[1]), int(g[2]))),
 
+        # Rapido/Ola: "Auto Ride\n01 Jul 2026 • 09:02 AM"
+        # Date appears right after ride type line, followed by bullet/time
+        (r"(?:auto\s+ride|cab\s+ride|bike\s+ride|auto\s+priority|prime\s+ride)\s+(\d{1,2})\s+([A-Za-z]{3,9})\s+(20\d{2})",
+         lambda g: _make(int(g[0]), _mon(g[1]), int(g[2]))),
+
         # "Date: 23/09/26" or "Date : 23/09/26"
         (r"[Dd]ate\s*[:\-]\s*(\d{1,2})[/\-\.](\d{2})[/\-\.](\d{2})(?!\d)",
          lambda g: _make(int(g[0]), int(g[1]), _2yr(g[2]))),
@@ -220,6 +226,20 @@ def extract_date(text: str) -> Optional[date]:
         # "Time of ride: DD Mon YYYY" or similar ride labels
         (r"(?:time\s+of\s+ride|ride\s+date|trip\s+date)[^\d]{0,20}(\d{1,2})\s+([A-Za-z]{3,9})\s+(20\d{2})",
          lambda g: _make(int(g[0]), _mon(g[1]), int(g[2]))),
+
+        # Rapido PDF: "Time of Ride    Jun 16th 2026, 6:39 PM"
+        # Ordinal day with full month name
+        (r"(?:time\s+of\s+ride|ride\s+time)\s+([A-Za-z]{3,9})\s+(\d{1,2})(?:st|nd|rd|th)\s+(20\d{2})",
+         lambda g: _make(int(g[1]), _mon(g[0]), int(g[2]))),
+
+        # Uber PDF: "Sept 12, 2026" or "Aug 21, 2026" top-right corner
+        # Format: Mon DD, YYYY (no time on same line)
+        (r"^([A-Za-z]{3,9})\s+(\d{1,2}),?\s+(20\d{2})\s*$",
+         lambda g: _make(int(g[1]), _mon(g[0]), int(g[2]))),
+
+        # Uber PDF fallback: "Sept 12, 2026" anywhere
+        (r"([A-Za-z]{3,9})\s+(\d{1,2}),\s+(20\d{2})",
+         lambda g: _make(int(g[1]), _mon(g[0]), int(g[2]))),
     ]
 
     for pat, fn in labelled:
